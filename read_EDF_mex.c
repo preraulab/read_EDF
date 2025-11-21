@@ -23,14 +23,6 @@
  *                    .text  : 1×K cell array of annotation strings
  *                  Returns empty matrix [] + warning if no annotations exist
  *
- * Features:
- *   • Fully lazy evaluation — only reads what is requested
- *   • Clear error + list of valid channels on invalid channel request
- *   • Warning + [] return when no EDF Annotations channel is present
- *   • Handles broken headers (num_data_records = -1) via file size inference
- *   • Full EDF+ TAL annotation parsing (multiple texts per onset)
- *   • Robust digital → physical unit conversion per channel
- *   • No memory leaks, no crashes — rigorously tested on MATLAB R2025b (macOS ARM64)
  *
  * Example:
  *   h = read_EDF_mex('data.edf');                                    % header only
