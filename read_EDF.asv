@@ -62,7 +62,7 @@ epochs = p.Results.Epochs;
 verbose = p.Results.Verbose;
 repair_header = p.Results.RepairHeader;
 force_matlab = p.Results.forceMATLAB;
-debug = p.Results.debug;
+debug = p.Results.forceMATLAB;
 
 %% ---------------- MEX HANDLING ----------------
 script_dir = fileparts(mfilename('fullpath'));
@@ -84,7 +84,8 @@ if ~force_matlab
     end
     if mex_exists
         try
-            [varargout{1:nargout}] = read_EDF_mex(edf_fname, channels, epochs, verbose, repair_header, debug);
+            disp('running mex')
+            [varargout{1:nargout}] = read_EDF_mex(edf_fname, channels, epochs, verbose, repair_header, true);
             % ---------------- Add total data length fields ----------------
             total_seconds = varargout{1}.num_data_records * varargout{1}.data_record_duration;
             varargout{1}.total_data_seconds = total_seconds;
