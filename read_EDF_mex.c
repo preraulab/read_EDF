@@ -1,12 +1,12 @@
 /**
- * READ_EDF_MEX - Fast, robust EDF/EDF+ reader (release build)
- *
- * MATLAB usage:
- *   [header, sigheader, data, annotations] = read_EDF_mex(filename, channels, epochs, verbose, repair, debug)
- *
- * Compile:
- *   mex -largeArrayDims read_EDF_mex.c
- */
+* READ_EDF_MEX - Fast, robust EDF/EDF+ reader (release build)
+*
+* MATLAB usage:
+*   [header, sigheader, data, annotations] = read_EDF_mex(filename, channels, epochs, verbose, repair, debug)
+*
+* Compile:
+*   mex -largeArrayDims read_EDF_mex.c
+*/
 
 #include "mex.h"
 #include <stdio.h>
@@ -21,15 +21,15 @@
 #define EDF_HEADER_SIZE 256
 
 /* ============================================================
- *                         DEBUG MACROS
- * ============================================================ */
+*                         DEBUG MACROS
+* ============================================================ */
 #define DBG(...) do { if (debug) mexPrintf(__VA_ARGS__); } while (0)
 #define ASSERT(cond) \
-    do { if (debug && !(cond)) mexErrMsgIdAndTxt("read_EDF_mex:Assert", #cond); } while (0)
+do { if (debug && !(cond)) mexErrMsgIdAndTxt("read_EDF_mex:Assert", #cond); } while (0)
 
 /* ============================================================
- *                         STRUCTS
- * ============================================================ */
+*                         STRUCTS
+* ============================================================ */
 
 typedef struct {
     char edf_ver[9];
@@ -60,13 +60,8 @@ typedef struct {
 } Annotation;
 
 /* ============================================================
- *                         UTILITIES
- * ============================================================ */
-
-static int is_little_endian(void) {
-    uint16_t x = 1;
-    return *(uint8_t*)&x;
-}
+*                         UTILITIES
+* ============================================================ */
 
 static void trim_string(char *s) {
     char *p = s;
@@ -77,8 +72,8 @@ static void trim_string(char *s) {
 }
 
 /* ============================================================
- *                         HEADER IO
- * ============================================================ */
+*                         HEADER IO
+* ============================================================ */
 
 static int read_edf_header(FILE *fid, EDF_Header *h) {
     unsigned char buf[EDF_HEADER_SIZE];
@@ -119,8 +114,72 @@ static int read_signal_headers(FILE *fid, Signal_Header *sh, int nsig) {
 }
 
 /* ============================================================
- *                         MEX ENTRY
- * ============================================================ */
+*                   EDF+ ANNOTATION PARSER
+* ============================================================ */
+
+static void parse_tal_block_fast(
+    const unsigned char *buf, mwSize len,
+    Annotation **out, mwSize *count
+) {
+    mwSize i = 0;
+
+    while (i < len) {
+        while (i < len && buf[i] == 0) i++;
+        if (i >= len) break;
+
+        if (buf[i] != '+' && buf[i] != '-') { i++; continue; }
+
+        char onset_str[64];
+        mwSize j = 0;
+        while (i < len && buf[i] != 20 && j < sizeof(onset_str)-1)
+            onset_str[j++] = buf[i++];
+        onset_str[j] = 0;
+        if (i >= len) break;
+        i++; /* skip 0x14 */
+
+        char **texts = NULL;
+        mwSize ntext = 0;
+
+        while (i < len && buf[i] != 0) {
+            char txt[256];
+            mwSize k = 0;
+            while (i < len && buf[i] != 20 && buf[i] != 0 && k < sizeof(txt)-1)
+                txt[k++] = buf[i++];
+            txt[k] = 0;
+
+            if (k > 0) {
+                texts = mxRealloc(texts, (ntext+1)*sizeof(char*));
+                texts[ntext] = mxMalloc(k+1);
+                memcpy(texts[ntext], txt, k+1);
+                ntext++;
+            }
+            if (i < len && buf[i] == 20) i++;
+        }
+
+        if (ntext > 0) {
+            *out = mxRealloc(*out, (*count + 1) * sizeof(Annotation));
+            (*out)[*count].onset = atof(onset_str);
+
+            mxArray *cell = mxCreateCellMatrix(1, ntext);
+            for (mwSize t = 0; t < ntext; t++) {
+                mxSetCell(cell, t, mxCreateString(texts[t]));
+                mxFree(texts[t]);
+            }
+            mxFree(texts);
+
+            (*out)[*count].texts = cell;
+            (*count)++;
+        } else {
+            mxFree(texts);
+        }
+
+        i++;
+    }
+}
+
+/* ============================================================
+*                         MEX ENTRY
+* ============================================================ */
 
 void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
 
@@ -133,9 +192,6 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
     char fname[4096];
     mxGetString(prhs[0], fname, sizeof(fname));
 
-    DBG("=== READ_EDF_MEX RELEASE BUILD ===\n");
-    DBG("Opening file: %s\n", fname);
-
     FILE *fid = fopen(fname,"rb");
     if (!fid) mexErrMsgIdAndTxt("read_EDF_mex:File","Cannot open file");
 
@@ -143,51 +199,33 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
     if (!read_edf_header(fid,&hdr))
         mexErrMsgIdAndTxt("read_EDF_mex:Header","Invalid EDF header");
 
-    DBG("Num signals: %d\n", hdr.num_signals);
-    DBG("Header bytes: %d\n", hdr.num_header_bytes);
-
     Signal_Header *sig = mxCalloc(hdr.num_signals,sizeof(Signal_Header));
     read_signal_headers(fid,sig,hdr.num_signals);
 
     mwSize total_samp_per_rec = 0;
+    int annot_idx = -1;
     for (int i=0;i<hdr.num_signals;i++) {
         sig[i].sampling_frequency = sig[i].samples_in_record / hdr.data_record_duration;
         total_samp_per_rec += sig[i].samples_in_record;
+        if (strcmp(sig[i].signal_labels,"EDF Annotations")==0)
+            annot_idx = i;
     }
 
-    /* ----- determine records ----- */
-    fseek(fid,0,SEEK_END);
-    mwSize fsize = ftell(fid);
-    mwSize data_bytes = fsize - hdr.num_header_bytes;
-    mwSize bytes_per_rec = total_samp_per_rec * 2;
-    mwSize nrec = data_bytes / bytes_per_rec;
+    /* ===================== Signal Data (conditional) ===================== */
+    unsigned char *raw = NULL;
+    mwSize nrec = 0, bytes_per_rec = total_samp_per_rec*2;
+    if (nlhs >= 3) {  // only read raw data if user requested it
+        fseek(fid,0,SEEK_END);
+        mwSize fsize = ftell(fid);
+        mwSize data_bytes = fsize - hdr.num_header_bytes;
+        nrec = data_bytes / bytes_per_rec;
 
-    DBG("Total samples/record: %llu\n",(unsigned long long)total_samp_per_rec);
-    DBG("Records detected: %llu\n",(unsigned long long)nrec);
-
-    /* ----- epoch selection ----- */
-    mwSize start_rec=0,end_rec=nrec;
-    if (nrhs>2 && mxGetNumberOfElements(prhs[2])>=2) {
-        double *e=mxGetPr(prhs[2]);
-        start_rec=(mwSize)e[0];
-        end_rec=(mwSize)e[1];
+        raw = mxMalloc(data_bytes);
+        fseek(fid,hdr.num_header_bytes,SEEK_SET);
+        fread(raw,1,data_bytes,fid);
     }
-    if (end_rec>nrec) end_rec=nrec;
-    mwSize nrec_out=end_rec-start_rec;
 
-    /* ----- read raw bytes ----- */
-    unsigned char *raw = mxMalloc(data_bytes);
-    fseek(fid,hdr.num_header_bytes,SEEK_SET);
-    fread(raw,1,data_bytes,fid);
-    fclose(fid);
-
-    ASSERT(data_bytes == nrec*bytes_per_rec);
-
-    /* ============================================================
-     *                         OUTPUTS
-     * ============================================================ */
-
-    /* Header */
+    /* ===================== Header Output ===================== */
     if (nlhs>=1) {
         const char *f[]={"edf_ver","patient_id","local_rec_id","recording_startdate",
                          "recording_starttime","num_header_bytes","num_data_records",
@@ -199,12 +237,12 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         mxSetField(plhs[0],0,"recording_startdate",mxCreateString(hdr.recording_startdate));
         mxSetField(plhs[0],0,"recording_starttime",mxCreateString(hdr.recording_starttime));
         mxSetField(plhs[0],0,"num_header_bytes",mxCreateDoubleScalar(hdr.num_header_bytes));
-        mxSetField(plhs[0],0,"num_data_records",mxCreateDoubleScalar((double)nrec));
+        mxSetField(plhs[0],0,"num_data_records",mxCreateDoubleScalar((double)hdr.num_data_records));
         mxSetField(plhs[0],0,"data_record_duration",mxCreateDoubleScalar(hdr.data_record_duration));
         mxSetField(plhs[0],0,"num_signals",mxCreateDoubleScalar(hdr.num_signals));
     }
 
-    /* Signal headers */
+    /* ===================== Signal Header Output ===================== */
     if (nlhs>=2) {
         const char *f[]={"signal_labels","transducer_type","physical_dimension",
                          "physical_min","physical_max","digital_min","digital_max",
@@ -212,6 +250,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         plhs[1]=mxCreateStructMatrix(1,hdr.num_signals,10,f);
         for (int i=0;i<hdr.num_signals;i++) {
             mxSetField(plhs[1],i,"signal_labels",mxCreateString(sig[i].signal_labels));
+            mxSetField(plhs[1],i,"transducer_type",mxCreateString(sig[i].transducer_type));
+            mxSetField(plhs[1],i,"physical_dimension",mxCreateString(sig[i].physical_dimension));
             mxSetField(plhs[1],i,"physical_min",mxCreateDoubleScalar(sig[i].physical_min));
             mxSetField(plhs[1],i,"physical_max",mxCreateDoubleScalar(sig[i].physical_max));
             mxSetField(plhs[1],i,"digital_min",mxCreateDoubleScalar(sig[i].digital_min));
@@ -221,24 +261,23 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         }
     }
 
-    /* Signal data */
-    if (nlhs>=3) {
+    /* ===================== Signal Data Output ===================== */
+    if (nlhs>=3 && raw!=NULL) {
         plhs[2]=mxCreateCellMatrix(1,hdr.num_signals);
         mwSize offset=0;
-
         for (int s=0;s<hdr.num_signals;s++) {
             mwSize spr=sig[s].samples_in_record;
-            mwSize len=spr*nrec_out;
+            mwSize len=spr*hdr.num_data_records;
             mxArray *v=mxCreateDoubleMatrix(1,len,mxREAL);
             double *out=mxGetPr(v);
 
             double scale=(sig[s].physical_max-sig[s].physical_min) /
-                          (sig[s].digital_max-sig[s].digital_min);
+                (sig[s].digital_max-sig[s].digital_min);
             double offs=sig[s].physical_min - sig[s].digital_min*scale;
 
             mwSize out_i=0;
-            for (mwSize r=0;r<nrec_out;r++) {
-                mwSize base=(start_rec+r)*total_samp_per_rec + offset;
+            for (mwSize r=0;r<hdr.num_data_records;r++) {
+                mwSize base=r*total_samp_per_rec + offset;
                 for (mwSize k=0;k<spr;k++) {
                     mwSize idx=2*(base+k);
                     int16_t vraw=(int16_t)(raw[idx] | (raw[idx+1]<<8));
@@ -248,10 +287,41 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
             mxSetCell(plhs[2],s,v);
             offset+=spr;
         }
+        mxFree(raw);
     }
 
-    mxFree(raw);
-    mxFree(sig);
+    /* ===================== Annotation Output ===================== */
+    if (nlhs>=4 && annot_idx>=0) {
+        const char *f[]={"onset","text"};
+        mxArray *A = mxCreateStructMatrix(0,0,2,f);
 
-    DBG("READ_EDF_MEX completed successfully\n");
+        Annotation *alist = NULL;
+        mwSize acount = 0;
+        for (mwSize r=0;r<hdr.num_data_records;r++) {
+            mwSize byte_off = 0;
+            for (int i=0;i<annot_idx;i++)
+                byte_off += sig[i].samples_in_record*2;
+
+            mwSize annot_bytes = sig[annot_idx].samples_in_record*2;
+            unsigned char *blk = mxMalloc(annot_bytes);
+            fseek(fid, hdr.num_header_bytes + r*bytes_per_rec + byte_off, SEEK_SET);
+            fread(blk, 1, annot_bytes, fid);
+            parse_tal_block_fast(blk, annot_bytes, &alist, &acount);
+            mxFree(blk);
+        }
+
+        if (acount > 0) {
+            mxDestroyArray(A);
+            A = mxCreateStructMatrix(acount,1,2,f);
+            for (mwSize i=0;i<acount;i++) {
+                mxSetField(A,i,"onset",mxCreateDoubleScalar(alist[i].onset));
+                mxSetField(A,i,"text",alist[i].texts);
+            }
+        }
+        mxFree(alist);
+        plhs[3] = A;
+    }
+
+    mxFree(sig);
+    fclose(fid);
 }
