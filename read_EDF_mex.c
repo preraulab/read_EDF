@@ -5,7 +5,7 @@
 *   [header, sigheader, data, annotations] = read_EDF_mex(filename, channels, epochs, verbose, repair, debug)
 *
 * Compile:
-*   mex -largeArrayDims read_EDF_mex.c
+*   mex -O -largeArrayDims read_EDF_mex.c
 */
 
 #include "mex.h"
@@ -108,9 +108,62 @@ static int read_signal_headers(FILE *fid, Signal_Header *sh, int nsig) {
     for (i=0;i<nsig;i++) fread(tmp,8,1,fid), tmp[8]=0, sh[i].digital_max=atof(tmp);
     for (i=0;i<nsig;i++) fread(sh[i].prefiltering,80,1,fid), sh[i].prefiltering[80]=0;
     for (i=0;i<nsig;i++) fread(tmp,8,1,fid), tmp[8]=0, sh[i].samples_in_record=atoi(tmp);
-    for (i=0;i<nsig;i++) fread(tmp,32,1,fid); /* reserved */
+    for (i=0;i<nsig;i++) fread(tmp,32,1,fid);
 
     return 1;
+}
+
+/* ============================================================
+*                 EDF+ num_data_records FIX
+* ============================================================ */
+
+static void fix_num_records(FILE *fid, EDF_Header *hdr,
+                            Signal_Header *sig,
+                            const char *fname,
+                            int verbose,
+                            int repair)
+{
+    mwSize total_samp_per_rec = 0;
+    for (int i=0;i<hdr->num_signals;i++)
+        total_samp_per_rec += sig[i].samples_in_record;
+
+    mwSize bytes_per_rec = total_samp_per_rec * 2;
+
+    fseek(fid, 0, SEEK_END);
+    mwSize fsize = ftell(fid);
+    mwSize data_bytes = fsize - hdr->num_header_bytes;
+
+    if (bytes_per_rec == 0) return;
+
+    mwSize actual_records = data_bytes / bytes_per_rec;
+
+    if (hdr->num_data_records <= 0 ||
+        hdr->num_data_records != (int)actual_records)
+    {
+        if (verbose)
+            mexPrintf("Updating num_data_records from %d to %llu\n",
+                      hdr->num_data_records,
+                      (unsigned long long)actual_records);
+
+        if (repair) {
+            FILE *fw = fopen(fname, "r+b");
+            if (fw) {
+                char rec_str[9];
+                snprintf(rec_str, 9, "%-8llu",
+                         (unsigned long long)actual_records);
+                fseek(fw, 236, SEEK_SET);
+                fwrite(rec_str, 1, 8, fw);
+                fclose(fw);
+
+                if (verbose)
+                    mexPrintf("Header repaired on disk.\n");
+            }
+        }
+
+        hdr->num_data_records = (int)actual_records;
+    }
+
+    fseek(fid, hdr->num_header_bytes, SEEK_SET);
 }
 
 /* ============================================================
@@ -120,7 +173,7 @@ static int read_signal_headers(FILE *fid, Signal_Header *sh, int nsig) {
 static void parse_tal_block_fast(
     const unsigned char *buf, mwSize len,
     Annotation **out, mwSize *count
-) {
+    ) {
     mwSize i = 0;
 
     while (i < len) {
@@ -210,6 +263,17 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
         if (strcmp(sig[i].signal_labels,"EDF Annotations")==0)
             annot_idx = i;
     }
+
+    /* ============================================================
+    *     FIX EDF+ num_data_records BEFORE ANY OUTPUT
+    * ============================================================ */
+
+    int repair = (nrhs>4 && mxGetScalar(prhs[4])!=0);
+
+    fix_num_records(fid, &hdr, sig, fname, verbose, repair);
+
+    /* recompute bytes_per_rec using possibly corrected record count */
+    mwSize bytes_per_rec = total_samp_per_rec * 2;
 
     /* ===================== Signal Data (conditional) ===================== */
     unsigned char *raw = NULL;
