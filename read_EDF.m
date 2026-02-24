@@ -14,7 +14,7 @@ function varargout = read_EDF(edf_fname, varargin)
 %       'Channels'     : cell array - subset of channels to read (default: all)
 %       'Epochs'       : 1x2 vector [start_epoch end_epoch] (0-indexed, default: all)
 %       'Verbose'      : logical - print progress and status info (default: false)
-%       'RepairHeader' : logical - correct invalid record counts (default: false)
+%       'RepairHeader' : logical - correct invalid record counts and save with _fixed suffix (default: false)
 %       'forceMATLAB'  : logical - disable MEX usage (default: false)
 %       'debug'        : logical - debug mode for MEXt (default: false)
 %
@@ -182,6 +182,25 @@ if actual_records ~= header.num_data_records
     if verbose
         fprintf('Header record count mismatch. Using actual value: %d\n', actual_records);
     end
+
+    if repair_header
+        % Mirror MEX fix_num_records: write corrected count as left-justified
+        % 8-char ASCII string at byte offset 236 (0-based), same as MEX does.
+        fw = fopen(edf_fname, 'r+', 'ieee-le');
+        if fw < 0
+            warning('read_EDF:RepairFailed', ...
+                'Could not open file for header repair: %s', edf_fname);
+        else
+            rec_str = sprintf('%-8d', actual_records);   % left-justified, space-padded to 8 chars
+            fseek(fw, 236, 'bof');
+            fwrite(fw, rec_str, 'char');
+            fclose(fw);
+            if verbose
+                fprintf('Header repaired on disk: num_data_records written as %d.\n', actual_records);
+            end
+        end
+    end
+
     header.num_data_records = actual_records;
 end
 
