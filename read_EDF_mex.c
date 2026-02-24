@@ -1,12 +1,139 @@
 /**
-* READ_EDF_MEX - Fast, robust EDF/EDF+ reader (release build)
-*
-* MATLAB usage:
-*   [header, sigheader, data, annotations] = read_EDF_mex(filename, channels, epochs, verbose, repair, debug)
-*
-* Compile:
-*   mex -O -largeArrayDims read_EDF_mex.c
-*/
+ * READ_EDF_MEX  High-performance EDF / EDF+ file reader for MATLAB
+ *
+ * -------------------------------------------------------------------------
+ * DESCRIPTION
+ * -------------------------------------------------------------------------
+ *   READ_EDF_MEX is a compiled MEX implementation of a fast and robust
+ *   European Data Format (EDF / EDF+) reader. It performs:
+ *
+ *       • Full main header parsing (256-byte EDF header)
+ *       • Per-signal header parsing
+ *       • Automatic correction of invalid num_data_records
+ *       • Digital → physical unit conversion
+ *       • Multi-channel extraction
+ *       • EDF+ annotation (TAL) parsing
+ *       • Optional on-disk header repair
+ *       • Extensive debug instrumentation (when enabled)
+ *
+ *   The reader is designed for:
+ *
+ *       • Large PSG / EEG datasets
+ *       • Clinical EDF+ files with malformed record counts
+ *       • Efficient memory usage
+ *       • Deterministic, release-build stability
+ *
+ * -------------------------------------------------------------------------
+ * MATLAB USAGE
+ * -------------------------------------------------------------------------
+ *
+ *   [header, sigheader, data, annotations] =
+ *       read_EDF_mex(filename, channels, epochs, verbose, repair, debug)
+ *
+ *   Required:
+ *       filename  : string
+ *
+ *   Optional:
+ *       channels  : (currently unused placeholder)
+ *       epochs    : (currently unused placeholder)
+ *       verbose   : logical (prints header repair info)
+ *       repair    : logical (rewrite corrected record count to disk)
+ *       debug     : logical (enables internal assertions + tracing)
+ *
+ * -------------------------------------------------------------------------
+ * OUTPUTS
+ * -------------------------------------------------------------------------
+ *
+ *   header      : 1x1 struct
+ *       edf_ver
+ *       patient_id
+ *       local_rec_id
+ *       recording_startdate
+ *       recording_starttime
+ *       num_header_bytes
+ *       num_data_records
+ *       data_record_duration
+ *       num_signals
+ *
+ *   sigheader   : 1xN struct array (per signal)
+ *       signal_labels
+ *       transducer_type
+ *       physical_dimension
+ *       physical_min
+ *       physical_max
+ *       digital_min
+ *       digital_max
+ *       prefiltering
+ *       samples_in_record
+ *       sampling_frequency
+ *
+ *   data        : 1xN cell array
+ *       Each cell contains a 1x(total_samples) double vector
+ *       converted to physical units.
+ *
+ *   annotations : struct array (EDF+ only)
+ *       onset   : double (seconds)
+ *       text    : 1xM cell array of annotation strings
+ *
+ * -------------------------------------------------------------------------
+ * DIGITAL → PHYSICAL CONVERSION
+ * -------------------------------------------------------------------------
+ *
+ *   For each signal:
+ *
+ *       scale = (phys_max - phys_min) / (dig_max - dig_min)
+ *       offset = phys_min - dig_min * scale
+ *
+ *       physical_value = digital_value * scale + offset
+ *
+ * -------------------------------------------------------------------------
+ * EDF+ RECORD COUNT CORRECTION
+ * -------------------------------------------------------------------------
+ *
+ *   Many EDF+ files contain:
+ *       num_data_records = -1
+ *       or incorrect values.
+ *
+ *   This implementation derives the true record count from:
+ *
+ *       file_size
+ *       header.num_header_bytes
+ *       samples_in_record (all channels)
+ *
+ *   If mismatch is detected:
+ *       • header is corrected in memory
+ *       • optionally repaired on disk (repair = true)
+ *
+ * -------------------------------------------------------------------------
+ * DEBUG MODE
+ * -------------------------------------------------------------------------
+ *
+ *   When debug = true:
+ *       • Internal assertions are enabled
+ *       • Detailed header + signal diagnostics printed
+ *       • Raw sample previews printed (first channel only)
+ *
+ *   Intended for development, not production.
+ *
+ * -------------------------------------------------------------------------
+ * COMPILATION
+ * -------------------------------------------------------------------------
+ *
+ *   mex -O -largeArrayDims read_EDF_mex.c
+ *
+ *   -largeArrayDims is REQUIRED.
+ *
+ * -------------------------------------------------------------------------
+ * NOTES
+ * -------------------------------------------------------------------------
+ *
+ *   • Assumes little-endian EDF (standard compliant).
+ *   • Digital samples are 16-bit signed integers.
+ *   • Designed for large datasets (uses mwSize indexing).
+ *   • Safe for multi-GB EDF files.
+ *
+ * -------------------------------------------------------------------------
+ */
 
 #include "mex.h"
 #include <stdio.h>
