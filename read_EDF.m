@@ -16,7 +16,8 @@ function varargout = read_EDF(edf_fname, varargin)
 %       'Verbose'      : logical - print progress and status info (default: false)
 %       'RepairHeader' : logical - correct invalid record counts and save with _fixed suffix (default: false)
 %       'forceMATLAB'  : logical - disable MEX usage (default: false)
-%       'debug'        : logical - debug mode for MEXt (default: false)
+%       'debug'        : logical - debug mode for MEX (default: false)
+%       'deidentify'   : logical - overwrite PHI fields and save with _deidentified suffix (default: false)
 %
 %   Outputs:
 %       header   : structure containing EDF file-level metadata
@@ -55,6 +56,7 @@ addParameter(p, 'Verbose', false, @islogical);
 addParameter(p, 'RepairHeader', false, @islogical);
 addParameter(p, 'forceMATLAB', false, @islogical);
 addParameter(p, 'debug', false, @islogical);
+addParameter(p, 'deidentify', false, @islogical);
 parse(p, varargin{:});
 
 channels        = p.Results.Channels;
@@ -63,6 +65,7 @@ verbose         = p.Results.Verbose;
 repair_header   = p.Results.RepairHeader;
 force_matlab    = p.Results.forceMATLAB;
 debug           = p.Results.debug;
+deidentify      = p.Results.deidentify;
 
 %% ---------------- MEX HANDLING ----------------
 script_dir = fileparts(mfilename('fullpath'));
@@ -73,6 +76,10 @@ if ~force_matlab
     if mex_exists
         try
             [varargout{1:nargout}] = read_EDF_mex(edf_fname, channels, epochs, verbose, repair_header, debug);
+            % Deidentify post-MEX if requested (MEX does not handle this)
+            if deidentify
+                deidentify_edf(edf_fname, repair_header, verbose);
+            end
             return
         catch ME
             if verbose
@@ -87,7 +94,7 @@ else
 end
 
 %% ---------------- MATLAB FALLBACK ----------------
-[varargout{1:nargout}] = read_EDF_matlab(edf_fname, channels, epochs, verbose, repair_header);
+[varargout{1:nargout}] = read_EDF_matlab(edf_fname, channels, epochs, verbose, repair_header, deidentify);
 
 end
 
@@ -95,7 +102,7 @@ end
 %% =========================================================================
 %  PURE MATLAB EDF READER
 % =========================================================================
-function varargout = read_EDF_matlab(edf_fname, channels, epochs, verbose, repair_header)
+function varargout = read_EDF_matlab(edf_fname, channels, epochs, verbose, repair_header, deidentify)
 
 fid = fopen(edf_fname, 'r', 'ieee-le');
 if fid < 0
@@ -270,6 +277,16 @@ signal_header = signal_header(signal_indices);
 
 annotations = extractAnnotations(edf_fname, header, signal_header);
 
+%% ---------------- DEIDENTIFY ----------------
+if deidentify
+    deidentify_edf(edf_fname, repair_header, verbose);
+
+    % Also scrub the returned header struct so it matches the written file
+    header.patient_id        = 'X X X X';
+    header.local_rec_id      = 'Startdate X X X X';
+    header.recording_startdate = '01.01.01';
+end
+
 %% ---------------- OUTPUT ----------------
 varargout{1} = header;
 if nargout > 1, varargout{2} = signal_header; end
@@ -277,6 +294,60 @@ if nargout > 2, varargout{3} = signal_cells; end
 if nargout > 3, varargout{4} = annotations; end
 
 end
+
+
+%% =========================================================================
+%  DEIDENTIFY HELPER — copy file with PHI fields blanked in the header
+% =========================================================================
+function deidentify_edf(edf_fname, repair_header, verbose)
+% Build output filename with appropriate suffix
+[fdir, fname, fext] = fileparts(edf_fname);
+if repair_header
+    out_fname = fullfile(fdir, [fname '_fixed_deidentified' fext]);
+else
+    out_fname = fullfile(fdir, [fname '_deidentified' fext]);
+end
+
+% Copy the entire file first, then patch header fields in the copy
+copyfile(edf_fname, out_fname);
+
+fw = fopen(out_fname, 'r+', 'ieee-le');
+if fw < 0
+    warning('read_EDF:DeidentifyFailed', ...
+        'Could not open output file for deidentification: %s', out_fname);
+    return
+end
+
+% EDF main header field byte offsets and widths (0-based offsets):
+%   patient_id          offset=8,   width=80
+%   local_rec_id        offset=88,  width=80
+%   recording_startdate offset=168, width=8
+phi_fields = {
+    'X X X X',          8,   80;   % patient_id
+    'Startdate X X X X', 88,  80;   % local_rec_id
+    '01.01.01',         168,  8;   % recording_startdate
+};
+
+for k = 1:size(phi_fields, 1)
+    val     = phi_fields{k,1};
+    offset  = phi_fields{k,2};
+    width   = phi_fields{k,3};
+
+    % Left-justify value, space-pad to exact field width
+    padded = sprintf('%-*s', width, val);
+    padded = padded(1:width);   % truncate if somehow over width
+
+    fseek(fw, offset, 'bof');
+    fwrite(fw, padded, 'char');
+end
+
+fclose(fw);
+
+if verbose
+    fprintf('Deidentified file written: %s\n', out_fname);
+end
+end
+
 
 %% =========================================================================
 %  EDF+ ANNOTATION PARSER — exclude blank annotation texts
