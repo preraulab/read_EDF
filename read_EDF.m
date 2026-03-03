@@ -76,6 +76,20 @@ if ~force_matlab
     if mex_exists
         try
             [varargout{1:nargout}] = read_EDF_mex(edf_fname, channels, epochs, verbose, repair_header, debug);
+
+            if nargout>0
+            %Add the total data in seconds
+                total_seconds = varargout{1}.num_data_records * varargout{1}.data_record_duration;
+                varargout{1}.total_data_seconds = total_seconds;
+                varargout{1}.total_data_hms = char(duration(0,0,total_seconds));
+            end
+
+            %Remove the whitespace around the labels
+            if nargout>1
+                new_signal_labels = cellfun(@strip,{varargout{2}.signal_labels},'UniformOutput', false);
+                [varargout{2}.signal_labels] = deal(new_signal_labels{:});
+            end
+
             % Deidentify post-MEX if requested (MEX does not handle this)
             if deidentify
                 deidentify_edf(edf_fname, repair_header, verbose);
@@ -155,11 +169,11 @@ for f = 1:numel(sig_fields)
     end
 end
 
-new_signal_labels = cellfun(@deblank,{signal_header.signal_labels},'UniformOutput', false);
+new_signal_labels = cellfun(@strip,{signal_header.signal_labels},'UniformOutput', false);
 [signal_header.signal_labels] = deal(new_signal_labels{:});
 
 %% ---------------- CHANNEL SELECTION ----------------
-labels = strtrim({signal_header.signal_labels});
+labels = strip({signal_header.signal_labels});
 
 if isempty(channels)
     signal_indices = 1:num_signals;
@@ -329,7 +343,7 @@ phi_fields = {
     'X X X X',          8,   80;   % patient_id
     'Startdate X X X X', 88,  80;   % local_rec_id
     '01.01.01',         168,  8;   % recording_startdate
-};
+    };
 
 for k = 1:size(phi_fields, 1)
     val     = phi_fields{k,1};
