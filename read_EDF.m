@@ -93,6 +93,23 @@ if ~force_matlab
             [varargout{2}.signal_labels] = deal(new_signal_labels{:});
         end
 
+        % Apply channel filtering and rereferencing (MEX always loads all channels)
+        if nargout >= 2 && ~isempty(channels)
+            all_labels = {varargout{2}.signal_labels};
+            [plain_chs, reref_pairs] = parse_reref_requests(channels, all_labels);
+            if nargout >= 3
+                [varargout{2}, varargout{3}] = apply_reref_filter(varargout{2}, varargout{3}, all_labels, plain_chs, reref_pairs);
+            else
+                all_labels_lower = lower(cellfun(@strtrim, all_labels, 'UniformOutput', false));
+                if ~isempty(plain_chs)
+                    plain_idx = find(ismember(all_labels_lower, lower(cellfun(@strtrim, plain_chs, 'UniformOutput', false))));
+                else
+                    plain_idx = [];
+                end
+                varargout{2} = varargout{2}(plain_idx);
+            end
+        end
+
         % Deidentify post-MEX if requested (MEX does not handle this)
         if deidentify
             deidentify_edf(edf_fname, repair_header, verbose);
@@ -177,11 +194,24 @@ new_signal_labels = cellfun(@strip,{signal_header.signal_labels},'UniformOutput'
 
 %% ---------------- CHANNEL SELECTION ----------------
 labels = strip({signal_header.signal_labels});
+reref_plain_chs = {};
+reref_pairs     = {};
 
 if isempty(channels)
     signal_indices = 1:num_signals;
 else
-    signal_indices = find(ismember(lower(labels), lower(strtrim(channels))));
+    [reref_plain_chs, reref_pairs] = parse_reref_requests(channels, labels);
+    % Collect constituent channels needed for rereferencing
+    constituent_chs = {};
+    for k = 1:numel(reref_pairs)
+        constituent_chs{end+1} = reref_pairs{k}{1};
+        constituent_chs{end+1} = reref_pairs{k}{2};
+    end
+    all_needed = unique([reref_plain_chs(:)', constituent_chs(:)'], 'stable');
+    if isempty(all_needed)
+        error('No valid channels found.');
+    end
+    signal_indices = find(ismember(lower(labels), lower(strtrim(all_needed))));
     if isempty(signal_indices)
         error('No valid channels found.');
     end
@@ -295,6 +325,12 @@ end
 
 signal_header = signal_header(signal_indices);
 
+% Apply rereferencing if requested
+if ~isempty(reref_pairs)
+    loaded_labels = {signal_header.signal_labels};
+    [signal_header, signal_cells] = apply_reref_filter(signal_header, signal_cells, loaded_labels, reref_plain_chs, reref_pairs);
+end
+
 annotations = extractAnnotations(edf_fname, header, signal_header);
 
 %% ---------------- DEIDENTIFY ----------------
@@ -313,6 +349,84 @@ if nargout > 1, varargout{2} = signal_header; end
 if nargout > 2, varargout{3} = signal_cells; end
 if nargout > 3, varargout{4} = annotations; end
 
+end
+
+
+%% =========================================================================
+%  PARSE REREFERENCING REQUESTS
+% =========================================================================
+function [plain_chs, reref_pairs] = parse_reref_requests(channels, all_labels)
+% Classify each entry in channels as a plain channel or an A-B reref pair.
+% A-B is treated as a rereference only when both A and B are valid channel
+% names in all_labels; otherwise the entry is passed through as a plain name.
+all_labels_lower = lower(cellfun(@strtrim, all_labels, 'UniformOutput', false));
+plain_chs   = {};
+reref_pairs = {};
+
+for k = 1:numel(channels)
+    ch = strtrim(channels{k});
+    % Direct match → plain channel
+    if ismember(lower(ch), all_labels_lower)
+        plain_chs{end+1} = ch;
+        continue;
+    end
+    % Try each '-' as a split point (leftmost first); keep first valid split
+    dashes = strfind(ch, '-');
+    found  = false;
+    for d = dashes
+        chA = strtrim(ch(1:d-1));
+        chB = strtrim(ch(d+1:end));
+        if ~isempty(chA) && ~isempty(chB) && ...
+                ismember(lower(chA), all_labels_lower) && ...
+                ismember(lower(chB), all_labels_lower)
+            reref_pairs{end+1} = {chA, chB, ch};
+            found = true;
+            break;
+        end
+    end
+    if ~found
+        plain_chs{end+1} = ch;   % pass through; will error naturally if invalid
+    end
+end
+end
+
+
+%% =========================================================================
+%  APPLY REREFERENCING FILTER
+% =========================================================================
+function [sh_out, sc_out] = apply_reref_filter(signal_header, signal_cell, all_labels, plain_chs, reref_pairs)
+% Filter signal_header/signal_cell to the explicitly requested plain channels,
+% then append one entry per A-B rereference pair (signal A minus signal B).
+% Constituent channels that were only needed for rereferencing are removed.
+all_labels_lower = lower(cellfun(@strtrim, all_labels, 'UniformOutput', false));
+
+% Indices of plain channels in the loaded data
+if isempty(plain_chs)
+    plain_idx = [];
+else
+    plain_idx = find(ismember(all_labels_lower, lower(cellfun(@strtrim, plain_chs, 'UniformOutput', false))));
+end
+
+% Compute rereferenced signals
+n = numel(reref_pairs);
+reref_sc = cell(1, n);
+if n > 0
+    reref_sh(1:n) = signal_header(1);   % preallocate with correct struct fields
+    for k = 1:n
+        chA  = reref_pairs{k}{1};
+        chB  = reref_pairs{k}{2};
+        name = reref_pairs{k}{3};
+        idxA = find(strcmpi(all_labels, chA), 1);
+        idxB = find(strcmpi(all_labels, chB), 1);
+        reref_sh(k)               = signal_header(idxA);
+        reref_sh(k).signal_labels = name;
+        reref_sc{k}               = signal_cell{idxA} - signal_cell{idxB};
+    end
+    sh_out = [signal_header(plain_idx), reref_sh];
+else
+    sh_out = signal_header(plain_idx);
+end
+sc_out = [signal_cell(plain_idx), reref_sc];
 end
 
 
