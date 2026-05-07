@@ -37,9 +37,13 @@ function [sh_out, sc_out] = apply_channel_derivations(sh_in, sc_in, channels, re
 %   pipeline is needed at all (callers route around it for plain label
 %   subsets / legacy 'A-B' strings handled by the MEX backend).
 %
-%   Errors: read_EDF:UnknownChannel, RateMismatch, BadMean,
-%   RefCollision, ParseError. The 'read_EDF:' prefix is preserved
-%   regardless of caller so existing error handlers keep working.
+%   Diagnostics. RateMismatch and BadMean always error.
+%   UnknownChannel, ParseError, and RefCollision raised inside a
+%   'Channels' entry are demoted to warnings — the offending entry is
+%   skipped and the remaining channels still load. The same conditions
+%   inside a 'References' entry remain hard errors, since references
+%   are foundation pieces. The 'read_EDF:' prefix is preserved
+%   regardless of caller so existing handlers keep working.
 
 if nargin < 5, verbose = false; end
 if nargin < 4, references = {}; end
@@ -64,73 +68,98 @@ aug_labels = {sh_aug.signal_labels};
 for k = 1:numel(channels)
     spec_str = strtrim(channels{k});
 
-    [user_alias, body] = split_alias(spec_str);
+    try
+        [user_alias, body] = split_alias(spec_str);
 
-    % Preprocess only the BODY — the alias name is a fresh user
-    % identifier and must not be searched for label substrings.
-    wrapped_body = preprocess_spec(body, aug_labels);
-    if isempty(user_alias)
-        wrapped = wrapped_body;
-    else
-        wrapped = [user_alias ' = ' wrapped_body];
-    end
-    if verbose
-        fprintf('apply_channel_derivations: ''%s''  ->  ''%s''\n', spec_str, wrapped);
-    end
-
-    spec = parse_expr_string(wrapped, aug_labels);
-
-    % Restore the user's raw spec text as the output label when no alias.
-    if isempty(user_alias)
-        spec.label = spec_str;
-    end
-
-    leaf_idx = zeros(1, numel(spec.leaves));
-    for j = 1:numel(spec.leaves)
-        leaf_idx(j) = find_label_idx(aug_labels, spec.leaves{j});
-        if leaf_idx(j) == 0
-            error('read_EDF:UnknownChannel', ...
-                'Unknown channel ''%s'' in spec ''%s''.', spec.leaves{j}, spec_str);
+        % Preprocess only the BODY — the alias name is a fresh user
+        % identifier and must not be searched for label substrings.
+        wrapped_body = preprocess_spec(body, aug_labels);
+        if isempty(user_alias)
+            wrapped = wrapped_body;
+        else
+            wrapped = [user_alias ' = ' wrapped_body];
         end
-    end
+        if verbose
+            fprintf('apply_channel_derivations: ''%s''  ->  ''%s''\n', spec_str, wrapped);
+        end
 
-    rates = zeros(1, numel(leaf_idx));
-    for j = 1:numel(leaf_idx)
-        rates(j) = sh_aug(leaf_idx(j)).sampling_frequency;
-    end
-    if any(rates ~= rates(1))
-        parts = cell(1, numel(leaf_idx));
+        spec = parse_expr_string(wrapped, aug_labels);
+
+        % Restore the user's raw spec text as the output label when no alias.
+        if isempty(user_alias)
+            spec.label = spec_str;
+        end
+
+        leaf_idx = zeros(1, numel(spec.leaves));
+        for j = 1:numel(spec.leaves)
+            leaf_idx(j) = find_label_idx(aug_labels, spec.leaves{j});
+            if leaf_idx(j) == 0
+                error('read_EDF:UnknownChannel', ...
+                    'Unknown channel ''%s'' in spec ''%s''.', spec.leaves{j}, spec_str);
+            end
+        end
+
+        rates = zeros(1, numel(leaf_idx));
         for j = 1:numel(leaf_idx)
-            parts{j} = sprintf('%s@%gHz', sh_aug(leaf_idx(j)).signal_labels, rates(j));
+            rates(j) = sh_aug(leaf_idx(j)).sampling_frequency;
         end
-        error('read_EDF:RateMismatch', ...
-            'Sampling rates differ in spec ''%s'': %s', spec_str, strjoin(parts, ', '));
-    end
+        if any(rates ~= rates(1))
+            parts = cell(1, numel(leaf_idx));
+            for j = 1:numel(leaf_idx)
+                parts{j} = sprintf('%s@%gHz', sh_aug(leaf_idx(j)).signal_labels, rates(j));
+            end
+            error('read_EDF:RateMismatch', ...
+                'Sampling rates differ in spec ''%s'': %s', spec_str, strjoin(parts, ', '));
+        end
 
-    if ~isempty(user_alias) && find_label_idx(aug_labels, user_alias) > 0
-        error('read_EDF:RefCollision', ...
-            ['Channels alias ''%s'' collides with an existing channel ' ...
-             'or earlier output / reference.'], user_alias);
-    end
+        if ~isempty(user_alias) && find_label_idx(aug_labels, user_alias) > 0
+            error('read_EDF:RefCollision', ...
+                ['Channels alias ''%s'' collides with an existing channel ' ...
+                 'or earlier output / reference.'], user_alias);
+        end
 
-    sig = zeros(size(sc_aug{leaf_idx(1)}));
-    for j = 1:numel(spec.terms)
-        sig = sig + spec.terms(j) * sc_aug{leaf_idx(j)};
-    end
+        sig = zeros(size(sc_aug{leaf_idx(1)}));
+        for j = 1:numel(spec.terms)
+            sig = sig + spec.terms(j) * sc_aug{leaf_idx(j)};
+        end
 
-    new_sh = sh_aug(leaf_idx(1));
-    new_sh.signal_labels = spec.label;
-    new_sh.physical_min  = min(sig);
-    new_sh.physical_max  = max(sig);
+        new_sh = sh_aug(leaf_idx(1));
+        new_sh.signal_labels = spec.label;
+        new_sh.physical_min  = min(sig);
+        new_sh.physical_max  = max(sig);
 
-    sh_out(end+1) = new_sh; %#ok<AGROW>
-    sc_out{end+1}  = sig;     %#ok<AGROW>
+        sh_out(end+1) = new_sh; %#ok<AGROW>
+        sc_out{end+1}  = sig;     %#ok<AGROW>
 
-    % Chaining: aliased outputs become reusable names downstream.
-    if ~isempty(user_alias)
-        sh_aug(end+1)  = new_sh; %#ok<AGROW>
-        sc_aug{end+1}  = sig;     %#ok<AGROW>
-        aug_labels{end+1} = user_alias; %#ok<AGROW>
+        % Chaining: aliased outputs become reusable names downstream.
+        if ~isempty(user_alias)
+            sh_aug(end+1)  = new_sh; %#ok<AGROW>
+            sc_aug{end+1}  = sig;     %#ok<AGROW>
+            aug_labels{end+1} = user_alias; %#ok<AGROW>
+        end
+    catch ME
+        % A per-entry resolution failure shouldn't take down the whole
+        % load — warn and move on so the caller still gets every
+        % channel that did resolve. Three cases are demoted to warnings:
+        %   UnknownChannel : a leaf doesn't match any label.
+        %   ParseError     : the parser tripped, typically because no
+        %                    label could be wrapped — e.g. plain 'C3-A2'
+        %                    against an EDF that only has '[C3-A2 - B]'.
+        %   RefCollision   : an alias 'OUT = expr' tries to redefine a
+        %                    name that already exists. Demoted so that
+        %                    fallback patterns like {'A', 'A=B'} or
+        %                    {'A=X', 'A=Y'} work the way you'd expect:
+        %                    first match wins, later same-name entries
+        %                    are quietly skipped.
+        % Other errors (RateMismatch, BadMean) still propagate.
+        if strcmp(ME.identifier, 'read_EDF:UnknownChannel') || ...
+                strcmp(ME.identifier, 'read_EDF:ParseError') || ...
+                strcmp(ME.identifier, 'read_EDF:RefCollision')
+            warning(ME.identifier, ...
+                'Skipping channel ''%s'': %s', spec_str, ME.message);
+            continue
+        end
+        rethrow(ME);
     end
 end
 end

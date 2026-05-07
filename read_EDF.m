@@ -168,30 +168,54 @@ function varargout = read_EDF(edf_fname, varargin)
 %   Unaliased Channels entries (no '=') don't pollute the namespace.
 %
 %   -------------------------------------------------------------------------
-%   Constraints (errors raised at validation, before any data is
-%   evaluated):
-%       read_EDF:UnknownChannel  - a leaf in an expression / reference
-%                                  doesn't resolve to a label in the
-%                                  augmented set.
-%       read_EDF:RefCollision    - a reference name collides with an
-%                                  EDF label or with an earlier
-%                                  reference (case-insensitive).
-%       read_EDF:RateMismatch    - leaves of one spec / reference span
-%                                  different sampling rates. The
-%                                  toolbox does not resample on the
-%                                  fly; resample after read_EDF or
-%                                  precompute compatible inputs.
-%       read_EDF:BadMean         - mean(...) called with fewer than
-%                                  2 arguments.
+%   Constraints. A per-entry resolution failure on a 'Channels' spec is
+%   demoted to a warning (warn + skip that entry, keep loading the
+%   rest); the same failure inside a 'References' entry is still a
+%   hard error, since References are foundation pieces other channels
+%   may depend on.
+%
+%   Demoted to warnings on a 'Channels' entry (errors elsewhere):
+%       read_EDF:UnknownChannel  - a leaf in an expression doesn't
+%                                  resolve to a label in the augmented
+%                                  set. Also emitted by the legacy
+%                                  backend when a plain label is not
+%                                  found in the file.
 %       read_EDF:ParseError      - malformed expression syntax (missing
 %                                  '=' in a Reference, unterminated
 %                                  '$' quote, dangling operator, ...).
+%                                  Also fires when a plain label like
+%                                  'C3-A2' is requested but the EDF
+%                                  has only '[C3-A2 - B]' — nothing
+%                                  matches, so the parser sees raw
+%                                  'C3-A2' and trips at the first 'C'.
+%       read_EDF:RefCollision    - an alias 'OUT = expr' tries to
+%                                  redefine a name that already exists
+%                                  (case-insensitive). Demoted so
+%                                  fallback patterns like
+%                                  {'A', 'A=B'} or {'A=X', 'A=Y'}
+%                                  work the way you'd expect: first
+%                                  match wins, later same-name entries
+%                                  are quietly skipped.
+%
+%   Always errors:
+%       read_EDF:RateMismatch    - leaves of one spec / reference span
+%                                  different sampling rates. The
+%                                  toolbox does not resample on the
+%                                  fly; resample after read_EDF,
+%                                  precompute compatible inputs, or
+%                                  pass 'TargetFs' to resample raw
+%                                  signals before the derived layer
+%                                  runs.
+%       read_EDF:BadMean         - mean(...) called with fewer than
+%                                  2 arguments.
 %
 %   Validation runs whenever 'References' is non-empty or any
 %   'Channels' entry contains 'mean(', '=', '+', or '$' — even if the
 %   caller ignored read_EDF's outputs. Plain labels and legacy 'A-B'
 %   strings stay on the existing fast backend (MEX or MATLAB) and are
-%   bit-identical to prior versions.
+%   bit-identical to prior versions; the MEX backend also emits
+%   read_EDF_mex:UnknownChannel as a warning when a requested plain
+%   label is not in the file (regardless of nargout).
 %
 %   -------------------------------------------------------------------------
 %   Examples (full call sites):
@@ -222,6 +246,12 @@ function varargout = read_EDF(edf_fname, varargin)
 %       % the computed difference of the raw channels.
 %       [~, ~, sc_labeled]  = read_EDF('overlap.edf', 'Channels', {'C1-A2'});
 %       [~, ~, sc_computed] = read_EDF('overlap.edf', 'Channels', {'$C1$-$A2$'});
+%
+%       % Same-channel-different-name fallback: load whichever of A,
+%       % X, Y, Z exists in this file under the canonical name 'A'.
+%       % First match wins; misses warn-and-skip.
+%       [~, ~, sc] = read_EDF('mixed.edf', ...
+%           'Channels', {'A', 'A=X', 'A=Y', 'A=Z'});
 %
 %       % Compressed input (streamed via zlib, no temp file in MEX path)
 %       [hdr, shdr, sc, ann] = read_EDF('sleep.edf.gz');
@@ -718,7 +748,11 @@ for k = 1:numel(channels)
     end
 
     if ~found
-        plain_chs{end+1} = ch;  % unknown; will produce an error on lookup
+        % Unknown channel — warn and drop. Matches the MEX backend, which
+        % emits read_EDF_mex:UnknownChannel and skips. Keeping the load
+        % running on the channels that did resolve is intentional.
+        warning('read_EDF:UnknownChannel', ...
+            'Channel ''%s'' not found in file.', ch);
     end
 end
 
@@ -744,10 +778,16 @@ function [sh_out, sc_out] = apply_channel_plan(signal_header, signal_cell, plain
 
 labels = {signal_header.signal_labels};
 
-% Indices of plain channels in the loaded data (preserve request order)
+% Indices of plain channels in the loaded data (preserve request order).
+% Anything that doesn't resolve gets dropped — parse_channel_plan should
+% already have warned for unknown labels, but we guard here too in case
+% a known channel didn't make it into the loaded subset for some reason.
 plain_idx = zeros(1, numel(plain_chs));
 for k = 1:numel(plain_chs)
-    plain_idx(k) = find(strcmpi(labels, strtrim(plain_chs{k})), 1);
+    f = find(strcmpi(labels, strtrim(plain_chs{k})), 1);
+    if ~isempty(f)
+        plain_idx(k) = f;
+    end
 end
 plain_idx = plain_idx(plain_idx > 0);
 

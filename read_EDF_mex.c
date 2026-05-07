@@ -667,6 +667,18 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
                               "No valid channels found in the channel list.");
         }
 
+        /* Warn about unmatched plain channels at plan-build time so the
+         * caller hears about a missing label even on header-only calls
+         * (nargout < 3). The data loop below silently emits an empty cell
+         * for these; without this pre-warn, header-only callers got no
+         * indication at all. */
+        for (int p = 0; p < nplan; p++) {
+            if (plan[p].kind == CH_PLAIN && plan[p].raw_idx_a < 0) {
+                mexWarnMsgIdAndTxt("read_EDF_mex:UnknownChannel",
+                    "Channel '%s' not found in file.", plan[p].label);
+            }
+        }
+
         DBG("\n===== CHANNEL PLAN =====\n");
         for (int p = 0; p < nplan; p++) {
             if (plan[p].kind == CH_PLAIN)
@@ -912,9 +924,10 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
                 int ib = plan[o].raw_idx_b;
 
                 if (ia < 0) {
+                    /* Already warned at plan-build time (above). Emit an
+                     * empty cell so the output array stays index-aligned
+                     * with the caller's Channels list. */
                     mxSetCell(plhs[2], o, mxCreateDoubleMatrix(1, 0, mxREAL));
-                    mexWarnMsgIdAndTxt("read_EDF_mex:UnknownChannel",
-                        "Channel '%s' not found in file.", plan[o].label);
                     continue;
                 }
 
