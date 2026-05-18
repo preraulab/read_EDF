@@ -597,7 +597,8 @@ if actual_records ~= header.num_data_records
         else
             rec_str = sprintf('%-8d', actual_records);   % left-justified, space-padded to 8 chars
             fseek(fw, 236, 'bof');
-            fwrite(fw, rec_str, 'char');
+            % uint8, not 'char': 'char' precision is encoding-dependent (can emit UTF-16).
+            fwrite(fw, uint8(rec_str), 'uint8');
             fclose(fw);
             if verbose
                 fprintf('Header repaired on disk: num_data_records written as %d.\n', actual_records);
@@ -906,7 +907,9 @@ for k = 1:size(phi_fields, 1)
     padded = padded(1:width);   % truncate if somehow over width
 
     fseek(fw, offset, 'bof');
-    fwrite(fw, padded, 'char');
+    % EDF header is 8-bit ASCII; 'char' precision is encoding-dependent and
+    % can emit 2 bytes/char (UTF-16). uint8 forces one byte per character.
+    fwrite(fw, uint8(padded), 'uint8');
 end
 
 fclose(fw);
